@@ -27,7 +27,13 @@ git clone https://github.com/ZhenHuangLab/collaborating-with-claude-code.git col
 ls -la ~/.codex/skills/collaborating-with-claude-code
 ```
 
-After that, Codex CLI can discover it when loading local skills; mention `collaborating-with-claude-code` (or `$collaborating-with-claude-code`) in a conversation to trigger it.
+4) Confirm the `claude_code_bridge.py` script path:
+
+By default, it is `~/.codex/skills/collaborating-with-claude-code/scripts/claude_code_bridge.py`. If it changes, update the path in `SKILL.md`.
+
+Tests show that explicitly declaring the correct script path in `SKILL.md` makes Codex execute the bridge script more efficiently.
+
+After that, Codex CLI can discover it when loading local skills; mention `collaborating-with-claude-code` (or `$collaborating-with-claude-code`, or a similar request in natural language) in a conversation to trigger it.
 
 ## Dependencies
 
@@ -40,13 +46,13 @@ After that, Codex CLI can discover it when loading local skills; mention `collab
 ## Run manually (without Codex CLI)
 
 ```bash
-python scripts/claude_code_bridge.py --cd "/path/to/repo" --PROMPT "Review the auth flow for bypasses; propose fixes as a unified diff."
+python <script_loc> --cd "/path/to/repo" --PROMPT "Review the auth flow for bypasses; propose fixes as a unified diff."
 ```
 
 Read-only review (avoid editing files / running commands):
 
 ```bash
-python scripts/claude_code_bridge.py --no-full-access --cd "/path/to/repo" --PROMPT "Review the auth flow and list issues (no code changes)."
+python <script_loc> --no-full-access --cd "/path/to/repo" --PROMPT "Review the auth flow and list issues (no code changes)."
 ```
 
 For a more complete parameter reference and multi-turn session usage, see `SKILL.md`.
@@ -66,4 +72,3 @@ When collaborating with Claude Code:
 ## License
 
 MIT License. See `LICENSE`.
-

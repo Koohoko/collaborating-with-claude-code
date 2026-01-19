@@ -176,37 +176,55 @@ def _extract_result(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], Opti
 def main() -> None:
     _configure_windows_stdio()
 
-    parser = argparse.ArgumentParser(description="Claude Code Bridge")
-    parser.add_argument("--PROMPT", required=True, help="Instruction for the task to send to Claude Code.")
-    parser.add_argument("--cd", required=True, help="Working directory to run Claude Code in (typically the repo root).")
-    parser.add_argument("--SESSION_ID", default="", help="Resume the specified Claude Code session. Defaults to start a new session.")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Model to use. Defaults to `{DEFAULT_MODEL}`.")
-    access_group = parser.add_mutually_exclusive_group()
+    parser = argparse.ArgumentParser(
+        description="Claude Code Bridge: run Claude Code CLI non-interactively and return JSON.",
+        epilog=(
+            "Examples:\n"
+            '  %(prog)s --cd /repo --PROMPT "Review auth flow; propose fixes."\n'
+            '  %(prog)s --no-full-access --cd /repo --PROMPT "List issues (read-only)."\n'
+            '  %(prog)s --cd /repo --SESSION_ID abc123 --PROMPT "Continue."\n'
+            "\n"
+            "Timing: Claude Code often takes 1-2+ minutes. Prefer waiting for completion; avoid rapid retries. Increase --timeout-s for long tasks.\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    req = parser.add_argument_group("required")
+    req.add_argument("--PROMPT", required=True, help="Instruction to send to Claude Code.")
+    req.add_argument("--cd", required=True, help="Working directory (typically the repo root).")
+
+    session = parser.add_argument_group("session")
+    session.add_argument("--SESSION_ID", default="", help="Resume session (default: start a new session).")
+    session.add_argument("--model", default=DEFAULT_MODEL, help=f"Model (default: `{DEFAULT_MODEL}`).")
+
+    access = parser.add_argument_group("access")
+    access_group = access.add_mutually_exclusive_group()
     access_group.add_argument(
         "--full-access",
         dest="full_access",
         action="store_true",
-        help="Enable non-interactive full access so Claude Code can edit files and run tools without permission prompts (default).",
+        help="(default) Full access: can edit files and run tools without prompts.",
     )
     access_group.add_argument(
         "--no-full-access",
         dest="full_access",
         action="store_false",
-        help="Disable full access (read-only planning/review). Uses read-only tools and avoids edits/commands by default.",
+        help="Read-only planning/review mode (no edits/commands by default).",
     )
     parser.set_defaults(full_access=True)
 
-    parser.add_argument(
+    advanced = parser.add_argument_group("advanced")
+    advanced.add_argument(
         "--permission-mode",
         default=None,
         help="Claude Code permission mode. Default: `bypassPermissions` when --full-access; `plan` when --no-full-access.",
     )
-    parser.add_argument(
+    advanced.add_argument(
         "--tools",
         default=None,
         help='Built-in tool set to expose. Use "default" for all tools, "" to disable all tools, or a comma-separated list (e.g. "Bash,Edit,Read").',
     )
-    parser.add_argument(
+    advanced.add_argument(
         "--allowedTools",
         default=None,
         help=(
@@ -214,9 +232,9 @@ def main() -> None:
             f"`{DEFAULT_READONLY_TOOLS}` when --no-full-access."
         ),
     )
-    parser.add_argument("--return-all-messages", action="store_true", help="Return the full streamed JSON event list from Claude Code.")
-    parser.add_argument("--timeout-s", type=float, default=1800.0, help="Process timeout in seconds. Defaults to 1800 (30 minutes).")
-    parser.add_argument("--claude-bin", default="claude", help="Claude Code executable name/path. Defaults to `claude`.")
+    advanced.add_argument("--return-all-messages", action="store_true", help="Return the full streamed JSON event list (debugging).")
+    advanced.add_argument("--timeout-s", type=float, default=1800.0, help="Timeout in seconds (default: 30 minutes).")
+    advanced.add_argument("--claude-bin", default="claude", help="Claude Code executable name/path (default: `claude`).")
 
     args = parser.parse_args()
 

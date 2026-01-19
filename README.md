@@ -27,7 +27,13 @@ git clone https://github.com/ZhenHuangLab/collaborating-with-claude-code.git col
 ls -la ~/.codex/skills/collaborating-with-claude-code
 ```
 
-完成后，Codex CLI 在加载本地 skills 时就能发现它；在对话中提到 `collaborating-with-claude-code`（或 `$collaborating-with-claude-code`）即可触发使用。
+4) 确认`claude_code_bridge.py`脚本路径：
+
+默认为`~/.codex/skills/collaborating-with-claude-code/scripts/claude_code_bridge.py`. 如果有变动，请在 `SKILL.md`中修改.
+
+测试表明，在 `SKILL.md` 中直接显式声明script的正确路径，会让codex执行bridge script变得更加高效。
+
+完成后，Codex CLI 在加载本地 skills 时就能发现它；在对话中提到 `collaborating-with-claude-code`（或 `$collaborating-with-claude-code`，或自然语言的类似要求）即可触发使用。
 
 ## 依赖
 
@@ -40,13 +46,13 @@ ls -la ~/.codex/skills/collaborating-with-claude-code
 ## 手动运行（不通过 Codex CLI）
 
 ```bash
-python scripts/claude_code_bridge.py --cd "/path/to/repo" --PROMPT "Review the auth flow for bypasses; propose fixes as a unified diff."
+python <script_loc> --cd "/path/to/repo" --PROMPT "Review the auth flow for bypasses; propose fixes as a unified diff."
 ```
 
 只读审查（避免改文件/跑命令）：
 
 ```bash
-python scripts/claude_code_bridge.py --no-full-access --cd "/path/to/repo" --PROMPT "Review the auth flow and list issues (no code changes)."
+python <script_loc> --no-full-access --cd "/path/to/repo" --PROMPT "Review the auth flow and list issues (no code changes)."
 ```
 
 更完整的参数说明与多轮会话用法见 `SKILL.md`。
