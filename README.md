@@ -6,6 +6,18 @@
 
 本仓库的核心入口是 `SKILL.md`（Codex skill 定义）以及 `scripts/claude_code_bridge.py`（桥接脚本）。
 
+## Features
+
+本skill相对于其他类似skill/协作模式，具有如下重要优势：
+
+1. 使用SOTA的context engineering技术，遵循渐进式披露 (progressive disclosure) 的原则，让codex只需要一次tool call就可以掌握该skill script的使用方法，第二次tool call即可正确调用，无需再搜索/读取该脚本；
+2. 兼容各类“在extended thinking开启后会对message结构进行严格校验的” Anthropic-compatible proxy. 
+    - 对于某些Anthropic-compatible proxy API, 在thinking启用后，包含工具调用链路的`assistant`消息，需要满足“assistant message 必须以 `thinking/redacted_thinking` 开头，然后才是 `tool_use`，再配套 `tool_result` ……”这类规则。而在print模式下使用claude code时，如果产生上述tool call 链路，`thinking`部分信息会在claude code侧被filtered掉，assistant message会以`tool_use`开头，从而导致router返回400 Error. 而这一问题在claude code交互界面一般不会出现。
+    - 针对这一问题，skill中的 bridge script 采取了“把一次长的agentic loop拆成很多次短的loop”的策略：
+        - 每次仅允许 claude code 做一次 agentic turn （最多仅一次tool call就调用停止）
+        - 然后bridge script 会用相同的session_id自动发送很短的继续指令，让它进行下一步
+    - 通过这种方法，可以最大限度地兼容通过各类Anthropic-compatible proxy API运行的claude code.
+
 ## 安装到 `~/.codex/skills/`
 
 1) 选择一个安装目录（如果不存在就创建）：

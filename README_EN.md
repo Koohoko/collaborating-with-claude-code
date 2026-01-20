@@ -6,6 +6,18 @@ A skill for **Codex CLI**: via a JSON bridge script, it delegates tasks such as 
 
 The main entry points of this repository are `SKILL.md` (the Codex skill definition) and `scripts/claude_code_bridge.py` (the bridge script).
 
+## Features
+
+Compared to other similar skills / collaboration workflows, this skill has the following key advantages:
+
+1. It uses state-of-the-art context engineering and follows the principle of progressive disclosure, so Codex can learn how to use the skill script with a single tool call, and then invoke it correctly on the second tool call—without needing to search for or read the script again.
+2. It is compatible with a wide range of Anthropic-compatible proxies that enforce strict message-structure validation when extended thinking is enabled.
+    - For some Anthropic-compatible proxy APIs, when thinking is enabled, an `assistant` message that contains a tool-call chain must follow rules like: the assistant message must start with `thinking/redacted_thinking`, then `tool_use`, followed by the corresponding `tool_result`, etc. However, when using Claude Code in print mode, if such a tool-call chain is produced, the `thinking` content may be filtered out on the Claude Code side, causing the assistant message to start directly with `tool_use`. This can trigger a 400 error from the router, even though the same issue usually does not occur in the interactive Claude Code UI.
+    - To address this, the bridge script in this skill adopts a strategy of splitting one long agentic loop into many short loops:
+        - Each iteration allows Claude Code to perform only a single agentic turn (at most one tool call, then stop).
+        - Then the bridge script automatically sends a short “continue” instruction using the same `session_id` to let it proceed to the next step.
+    - This approach maximizes compatibility when running Claude Code via various Anthropic-compatible proxy APIs.
+
 ## Install to `~/.codex/skills/`
 
 1) Choose an installation directory (create it if it doesn't exist):

@@ -20,7 +20,130 @@ from typing import Any, Dict, List, Optional, Tuple
 DEFAULT_MODEL = "claude-opus-4-5-20251101"
 DEFAULT_READONLY_TOOLS = "Read,Glob,Grep,LS"
 DEFAULT_FULL_ACCESS_ALLOWED_TOOLS = "*"
+DEFAULT_EXTENDED_THINKING_ENABLED = True
+CLAUDE_SETTINGS_ALWAYS_THINKING_KEY = "alwaysThinkingEnabled"
+DEFAULT_STEP_MODE = "auto"  # on|auto|off
+DEFAULT_STEP_MAX_STEPS = 64
+DEFAULT_STEP_CONTINUE_PROMPT = "Continue from where you left off. Do not restate previous content."
+CLAUDE_STEP_MAX_TURNS = 1
 
+
+def _parse_settings_arg(settings_arg: str) -> Dict[str, Any]:
+    """
+    Parse a Claude Code `--settings` argument as either:
+      - a JSON object string, or
+      - a path to a JSON file.
+
+    Returns a dict to be merged into the session settings.
+    """
+    raw = settings_arg.strip()
+    if not raw:
+        return {}
+
+    if raw.startswith("{"):
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("`--claude-settings` JSON must be an object.")
+        return parsed
+
+    path = Path(raw).expanduser()
+    if path.is_file():
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(parsed, dict):
+            raise ValueError("`--claude-settings` file must contain a JSON object.")
+        return parsed
+
+    # Last resort: try parsing as JSON (useful if a JSON string doesn't start with "{")
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("`--claude-settings` must be a JSON object or a JSON file path.")
+    return parsed
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    """
+    Best-effort removal of "thinking" blocks from Claude Code output.
+
+    The CLI typically returns only the final answer, but when extended thinking
+    is enabled some environments may include explicit thinking delimiters.
+    This keeps the bridge output focused on actionable content by default.
+    """
+    import re
+
+    if not text:
+        return text
+
+    # Common formats seen in tooling integrations:
+    #   <thinking> ... </thinking>
+    #   <analysis> ... </analysis>
+    # Remove those blocks if present; keep surrounding content.
+    stripped = re.sub(r"(?is)<thinking>.*?</thinking>\s*", "", text)
+    stripped = re.sub(r"(?is)<analysis>.*?</analysis>\s*", "", stripped)
+    return stripped.strip()
+
+
+def _is_thinking_schema_400(text: str) -> bool:
+    """
+    Detect the common 400 error shape when a proxy/router enables Anthropic
+    'thinking' but the upstream message history doesn't preserve thinking blocks
+    around tool_use/tool_result.
+
+    This typically looks like:
+      - Expected `thinking` or `redacted_thinking`, but found `tool_use`
+      - Expected `thinking` or `redacted_thinking`, but found `text`
+    """
+    if not text:
+        return False
+    if "API Error: 400" not in text:
+        return False
+    return "Expected `thinking` or `redacted_thinking`" in text
+
+
+def _build_claude_cmd(
+    *,
+    claude_bin: str,
+    prompt: str,
+    output_format: str,
+    model: str,
+    permission_mode: str,
+    tools: Optional[str],
+    allowed_tools: Optional[str],
+    session_id: str,
+    claude_settings: Dict[str, Any],
+    max_turns: Optional[int],
+    verbose: bool,
+) -> List[str]:
+    cmd: List[str] = [
+        claude_bin,
+        "-p",
+        prompt,
+        "--output-format",
+        output_format,
+        "--model",
+        model,
+        "--permission-mode",
+        permission_mode,
+    ]
+
+    if verbose:
+        cmd.append("--verbose")
+
+    if tools is not None:
+        cmd.extend(["--tools", tools])
+
+    if allowed_tools is not None:
+        cmd.extend(["--allowedTools", allowed_tools])
+
+    if claude_settings:
+        cmd.extend(["--settings", json.dumps(claude_settings, ensure_ascii=False)])
+
+    if max_turns is not None:
+        cmd.extend(["--max-turns", str(max_turns)])
+
+    if session_id:
+        cmd.extend(["--resume", session_id])
+
+    return cmd
 
 def _get_windows_npm_paths() -> List[Path]:
     """Return candidate directories for npm global installs on Windows."""
@@ -213,7 +336,44 @@ def main() -> None:
     )
     parser.set_defaults(full_access=True)
 
+    thinking = parser.add_argument_group("thinking")
+    thinking_group = thinking.add_mutually_exclusive_group()
+    thinking_group.add_argument(
+        "--extended-thinking",
+        dest="extended_thinking",
+        action="store_true",
+        help="(default) Enable Claude Code extended thinking for this run.",
+    )
+    thinking_group.add_argument(
+        "--no-extended-thinking",
+        dest="extended_thinking",
+        action="store_false",
+        help="Disable Claude Code extended thinking for this run.",
+    )
+    parser.set_defaults(extended_thinking=DEFAULT_EXTENDED_THINKING_ENABLED)
+
     advanced = parser.add_argument_group("advanced")
+    advanced.add_argument(
+        "--step-mode",
+        choices=["on", "auto", "off"],
+        default=DEFAULT_STEP_MODE,
+        help=(
+            "Work around some Anthropic-compatible proxies/routers that enforce strict thinking/tool message schemas. "
+            "When enabled, the bridge runs Claude Code in small agentic steps (`--max-turns 1`) and resumes until completion. "
+            "Default: on."
+        ),
+    )
+    advanced.add_argument(
+        "--step-max-steps",
+        type=int,
+        default=DEFAULT_STEP_MAX_STEPS,
+        help=f"Maximum number of resume iterations in step mode (default: {DEFAULT_STEP_MAX_STEPS}).",
+    )
+    advanced.add_argument(
+        "--step-continue-prompt",
+        default=DEFAULT_STEP_CONTINUE_PROMPT,
+        help=f'Prompt to send on each resume in step mode (default: "{DEFAULT_STEP_CONTINUE_PROMPT}").',
+    )
     advanced.add_argument(
         "--permission-mode",
         default=None,
@@ -231,6 +391,20 @@ def main() -> None:
             f"Comma-separated tools allowed without prompting. Default: `{DEFAULT_FULL_ACCESS_ALLOWED_TOOLS}` when --full-access; "
             f"`{DEFAULT_READONLY_TOOLS}` when --no-full-access."
         ),
+    )
+    advanced.add_argument(
+        "--claude-settings",
+        default=None,
+        help=(
+            "Additional Claude Code settings to apply for this run. "
+            "Provide either a JSON object string (e.g. '{\"model\":\"opus\"}') or a path to a JSON file. "
+            f"Note: this bridge always sets `{CLAUDE_SETTINGS_ALWAYS_THINKING_KEY}` based on --extended-thinking/--no-extended-thinking."
+        ),
+    )
+    advanced.add_argument(
+        "--keep-thinking-blocks",
+        action="store_true",
+        help="Do not strip <thinking>/<analysis> blocks from the returned agent_messages (debugging).",
     )
     advanced.add_argument("--return-all-messages", action="store_true", help="Return the full streamed JSON event list (debugging).")
     advanced.add_argument("--timeout-s", type=float, default=1800.0, help="Timeout in seconds (default: 30 minutes).")
@@ -261,43 +435,171 @@ def main() -> None:
     if not allowed_tools_provided:
         allowed_tools = DEFAULT_FULL_ACCESS_ALLOWED_TOOLS if args.full_access else DEFAULT_READONLY_TOOLS
 
-    output_format = "stream-json" if args.return_all_messages else "json"
-
-    cmd: List[str] = [
-        args.claude_bin,
-        "-p",
-        prompt,
-        "--output-format",
-        output_format,
-        "--model",
-        args.model,
-        "--permission-mode",
-        permission_mode,
-    ]
-
-    if tools is not None:
-        cmd.extend(["--tools", tools])
-
-    if allowed_tools is not None:
-        cmd.extend(["--allowedTools", allowed_tools])
-
-    if args.SESSION_ID:
-        cmd.extend(["--resume", args.SESSION_ID])
-
     try:
-        rc, stdout, stderr = _run(cmd, timeout_s=args.timeout_s, cwd=cd_path)
-    except FileNotFoundError as error:
+        claude_settings: Dict[str, Any] = _parse_settings_arg(args.claude_settings) if args.claude_settings else {}
+    except Exception as error:  # noqa: BLE001 - keep bridge resilient
         print(
             json.dumps(
-                {
-                    "success": False,
-                    "error": f"Failed to execute Claude Code CLI. Is `claude` installed and on PATH?\n\n{error}",
-                },
+                {"success": False, "error": f"Invalid --claude-settings: {error}"},
                 indent=2,
                 ensure_ascii=False,
             )
         )
         return
+
+    # Ensure controllable defaults: default to extended thinking ON, but allow opt-out.
+    claude_settings[CLAUDE_SETTINGS_ALWAYS_THINKING_KEY] = bool(args.extended_thinking)
+
+    output_format = "stream-json" if args.return_all_messages else "json"
+    verbose = bool(args.return_all_messages)
+
+    def run_one(*, run_prompt: str, resume_session_id: str, max_turns: Optional[int]) -> Tuple[int, str, str]:
+        cmd = _build_claude_cmd(
+            claude_bin=args.claude_bin,
+            prompt=run_prompt,
+            output_format=output_format,
+            model=args.model,
+            permission_mode=permission_mode,
+            tools=tools,
+            allowed_tools=allowed_tools,
+            session_id=resume_session_id,
+            claude_settings=claude_settings,
+            max_turns=max_turns,
+            verbose=verbose,
+        )
+        return _run(cmd, timeout_s=args.timeout_s, cwd=cd_path)
+
+    def print_exec_error(error: Exception) -> None:
+        print(
+            json.dumps(
+                {"success": False, "error": f"Failed to execute Claude Code CLI. Is `claude` installed and on PATH?\n\n{error}"},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
+    # Step-mode runner: some proxies enable thinking by default and reject multi-turn tool loops.
+    # This loop forces Claude Code to stop after each agentic step and resumes until completion.
+    def run_with_optional_stepping() -> Tuple[int, str, str]:
+        step_mode = str(args.step_mode or DEFAULT_STEP_MODE)
+        if step_mode not in ("on", "auto", "off"):
+            step_mode = DEFAULT_STEP_MODE
+
+        def summarize_run(stdout_text: str, stderr_text: str) -> Dict[str, Any]:
+            """
+            Return a small summary dict with keys:
+              - session_id
+              - subtype
+              - is_error
+              - result_text
+              - parse_error (optional)
+            Works for both `--output-format json` and `stream-json`.
+            """
+            if output_format == "json":
+                payload = _parse_single_json(stdout_text)
+                return {
+                    "session_id": payload.get("session_id"),
+                    "subtype": payload.get("subtype"),
+                    "is_error": bool(payload.get("is_error")),
+                    "result_text": payload.get("result") or "",
+                    "payload": payload,
+                }
+
+            messages = _parse_stream_json(stdout_text)
+            # Find the last result event.
+            last_result: Optional[Dict[str, Any]] = None
+            for msg in reversed(messages):
+                if isinstance(msg, dict) and msg.get("type") == "result":
+                    last_result = msg
+                    break
+
+            session_id, result_text, error_text = _extract_result(messages)
+            return {
+                "session_id": session_id,
+                "subtype": (last_result or {}).get("subtype"),
+                "is_error": bool((last_result or {}).get("is_error")) or bool(error_text),
+                "result_text": (result_text or "") if not error_text else (error_text or ""),
+                "messages": messages,
+            }
+
+        # We treat --step-mode=on as always stepping; auto will attempt one normal run first.
+        session_id = args.SESSION_ID
+        current_prompt = prompt
+
+        def attempt(*, use_step: bool, resume_id: str, run_prompt: str) -> Tuple[int, str, str]:
+            return run_one(
+                run_prompt=run_prompt,
+                resume_session_id=resume_id,
+                max_turns=CLAUDE_STEP_MAX_TURNS if use_step else None,
+            )
+
+        if step_mode in ("off", "auto"):
+            try:
+                rc0, stdout0, stderr0 = attempt(use_step=False, resume_id=session_id, run_prompt=current_prompt)
+            except FileNotFoundError as error:
+                print_exec_error(error)
+                raise SystemExit(0)
+
+            if step_mode == "off":
+                return rc0, stdout0, stderr0
+
+            # Auto: If it did not hit the specific thinking schema 400, just return it.
+            # Otherwise, fall through to stepping mode.
+            combined0 = "\n".join([stdout0.strip(), stderr0.strip()]).strip()
+            if not _is_thinking_schema_400(combined0):
+                return rc0, stdout0, stderr0
+
+            # If we can parse a session_id from the failed run, reuse it to avoid redoing tool work.
+            try:
+                summary0 = summarize_run(stdout0, stderr0)
+                session_id = (summary0.get("session_id") or session_id) if isinstance(summary0, dict) else session_id
+            except Exception:
+                # If parsing fails, start a new session in step mode.
+                session_id = ""
+
+            current_prompt = args.step_continue_prompt
+
+        # Step mode ON (or AUTO fallback):
+        # Keep resuming until Claude produces a final successful result.
+        for step_index in range(int(args.step_max_steps)):
+            try:
+                rc, stdout, stderr = attempt(use_step=True, resume_id=session_id, run_prompt=current_prompt)
+            except FileNotFoundError as error:
+                print_exec_error(error)
+                raise SystemExit(0)
+
+            # Update resume id if Claude Code returns one.
+            try:
+                summary = summarize_run(stdout, stderr)
+                session_id = summary.get("session_id") or session_id
+                subtype = summary.get("subtype")
+                is_error = bool(summary.get("is_error"))
+                result_text = summary.get("result_text") or ""
+            except Exception:
+                # If we can't parse, bail and surface raw output.
+                return rc, stdout, stderr
+
+            # Completed normally.
+            if subtype == "success" and not is_error and result_text.strip():
+                return rc, stdout, stderr
+
+            # Claude Code indicates it hit max turns and needs another resume.
+            if subtype == "error_max_turns" and session_id:
+                current_prompt = args.step_continue_prompt
+                continue
+
+            # If we hit the thinking schema error even in step mode, surface it (likely an upstream incompatibility).
+            combined = "\n".join([result_text.strip(), stderr.strip(), stdout.strip()]).strip()
+            if _is_thinking_schema_400(combined):
+                return rc, stdout, stderr
+
+            # Any other terminal condition: return the raw result.
+            return rc, stdout, stderr
+
+        # Exceeded max steps.
+        return 1, "", f"Step mode exceeded --step-max-steps={args.step_max_steps} without reaching a final result."
+
+    rc, stdout, stderr = run_with_optional_stepping()
 
     try:
         if output_format == "json":
@@ -305,20 +607,28 @@ def main() -> None:
             session_id = payload.get("session_id")
             result_text = payload.get("result")
             subtype = payload.get("subtype")
-            success = bool(payload.get("type") == "result" and subtype == "success" and session_id and result_text)
+            is_error = bool(payload.get("is_error"))
+            success = bool(payload.get("type") == "result" and subtype == "success" and not is_error and session_id and result_text)
 
             if success:
+                agent_messages = result_text
+                if not args.keep_thinking_blocks and agent_messages is not None:
+                    agent_messages = _strip_thinking_blocks(agent_messages)
                 result: Dict[str, Any] = {
                     "success": True,
                     "SESSION_ID": session_id,
-                    "agent_messages": result_text,
+                    "agent_messages": agent_messages,
                 }
             else:
                 error_bits = []
                 if subtype and subtype != "success":
                     error_bits.append(f"[claude subtype] {subtype}")
+                if is_error:
+                    error_bits.append("[claude is_error] true")
                 if stderr.strip():
                     error_bits.append(f"[stderr] {stderr.strip()}")
+                if rc != 0:
+                    error_bits.append(f"[exit_code] {rc}")
                 error_bits.append(f"[stdout] {stdout.strip()}")
                 result = {"success": False, "error": "\n".join(error_bits).strip()}
 
@@ -328,12 +638,25 @@ def main() -> None:
         else:
             messages = _parse_stream_json(stdout)
             session_id, result_text, error_text = _extract_result(messages)
-            success = bool(rc == 0 and session_id and result_text and not error_text)
+            last_result: Optional[Dict[str, Any]] = next(
+                (msg for msg in reversed(messages) if isinstance(msg, dict) and msg.get("type") == "result"),
+                None,
+            )
+            subtype = (last_result or {}).get("subtype")
+            is_error = bool((last_result or {}).get("is_error"))
+            success = bool(rc == 0 and subtype == "success" and not is_error and session_id and result_text and not error_text)
 
             if success:
-                result = {"success": True, "SESSION_ID": session_id, "agent_messages": result_text}
+                agent_messages = result_text
+                if not args.keep_thinking_blocks and agent_messages is not None:
+                    agent_messages = _strip_thinking_blocks(agent_messages)
+                result = {"success": True, "SESSION_ID": session_id, "agent_messages": agent_messages}
             else:
                 error_bits = []
+                if subtype and subtype != "success":
+                    error_bits.append(f"[claude subtype] {subtype}")
+                if is_error:
+                    error_bits.append("[claude is_error] true")
                 if error_text:
                     error_bits.append(f"[claude result] {error_text}")
                 if stderr.strip():

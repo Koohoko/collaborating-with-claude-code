@@ -25,7 +25,12 @@ Claude Code often needs **1–2+ minutes** per task.
 ## Requirements
 
 - Claude Code CLI installed (`claude --version`) and authenticated (e.g., `ANTHROPIC_API_KEY` or other auth flow).
+
+## Default
+
 - Defaults to **full access** (`--full-access`): use only in trusted repos/directories.
+- Defaults to **extended thinking ON** (can disable via `--no-extended-thinking`).
+- Defaults to **step mode ON** (can disable via `--step-mode off`).
 
 ## Quick start
 
@@ -58,9 +63,15 @@ python <script_loc> --cd "/repo" --SESSION_ID "abc123" --PROMPT "Now propose 5 t
 - `--SESSION_ID` (opt): Resume an existing Claude Code session.
 - `--model` (opt, default: `claude-opus-4-5-20251101`)
 - `--full-access` / `--no-full-access` (opt, default: `--full-access`)
+- `--extended-thinking` / `--no-extended-thinking` (opt, default: enabled)
 - `--permission-mode` (opt, default: full=`bypassPermissions`, readonly=`plan`)
 - `--tools` (opt, default: full=`default`, readonly=`Read,Glob,Grep,LS`)
 - `--allowedTools` (opt, default: full=`*`, readonly=`Read,Glob,Grep,LS`)
+- `--step-mode` (opt, default: `on`): `on|auto|off` — run Claude Code in small steps (`--max-turns 1`) and resume until completion.
+- `--step-max-steps` (opt): Maximum resume iterations in step mode.
+- `--step-continue-prompt` (opt): Prompt sent on each resume in step mode.
+- `--claude-settings` (opt): Extra Claude Code settings (JSON object string or JSON file path). The bridge always sets `alwaysThinkingEnabled` based on the thinking flags.
+- `--keep-thinking-blocks` (opt): Do not strip `<thinking>`/`<analysis>` blocks from the returned `agent_messages` (debugging).
 - `--return-all-messages` (opt): Return the full streamed JSON event list (debug).
 - `--timeout-s` (opt, default: 1800s)
 
