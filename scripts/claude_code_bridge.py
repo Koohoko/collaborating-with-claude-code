@@ -99,6 +99,34 @@ def _is_thinking_schema_400(text: str) -> bool:
     return "Expected `thinking` or `redacted_thinking`" in text
 
 
+def _extract_session_id(stdout: str, stderr: str) -> Optional[str]:
+    """
+    Best-effort session_id extraction from Claude Code stdout/stderr.
+
+    Some failure cases (including certain 400 proxy errors) may emit a session ID
+    to stderr, or produce non-JSON output even when `--output-format json` is set.
+    This lets the bridge continue the same session instead of silently starting a
+    new one.
+    """
+    import re
+
+    combined = "\n".join([stdout or "", stderr or ""]).strip()
+    if not combined:
+        return None
+
+    uuid = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    patterns = [
+        rf'"session_id"\s*:\s*"(?P<id>{uuid})"',
+        rf"\bSession ID:\s*(?P<id>{uuid})\b",
+        rf"\bsession[_ -]?id\s*[:=]\s*(?P<id>{uuid})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, combined)
+        if match:
+            return match.group("id")
+    return None
+
+
 def _build_claude_cmd(
     *,
     claude_bin: str,
@@ -109,6 +137,7 @@ def _build_claude_cmd(
     tools: Optional[str],
     allowed_tools: Optional[str],
     session_id: str,
+    continue_session: bool,
     claude_settings: Dict[str, Any],
     max_turns: Optional[int],
     verbose: bool,
@@ -140,7 +169,12 @@ def _build_claude_cmd(
     if max_turns is not None:
         cmd.extend(["--max-turns", str(max_turns)])
 
-    if session_id:
+    if continue_session and session_id:
+        raise ValueError("Cannot use both --continue and --resume.")
+
+    if continue_session:
+        cmd.append("--continue")
+    elif session_id:
         cmd.extend(["--resume", session_id])
 
     return cmd
@@ -307,7 +341,7 @@ def main() -> None:
             '  %(prog)s --no-full-access --cd /repo --PROMPT "List issues (read-only)."\n'
             '  %(prog)s --cd /repo --SESSION_ID abc123 --PROMPT "Continue."\n'
             "\n"
-            "Timing: Claude Code often takes 1-2+ minutes. Prefer waiting for completion; avoid rapid retries. Increase --timeout-s for long tasks.\n"
+            "Claude Code often takes 1-2+ minutes. Prefer waiting for completion; avoid rapid retries.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -360,7 +394,7 @@ def main() -> None:
         help=(
             "Work around some Anthropic-compatible proxies/routers that enforce strict thinking/tool message schemas. "
             "When enabled, the bridge runs Claude Code in small agentic steps (`--max-turns 1`) and resumes until completion. "
-            "Default: on."
+            f"Default: {DEFAULT_STEP_MODE}."
         ),
     )
     advanced.add_argument(
@@ -453,7 +487,9 @@ def main() -> None:
     output_format = "stream-json" if args.return_all_messages else "json"
     verbose = bool(args.return_all_messages)
 
-    def run_one(*, run_prompt: str, resume_session_id: str, max_turns: Optional[int]) -> Tuple[int, str, str]:
+    def run_one(
+        *, run_prompt: str, resume_session_id: str, continue_session: bool, max_turns: Optional[int]
+    ) -> Tuple[int, str, str]:
         cmd = _build_claude_cmd(
             claude_bin=args.claude_bin,
             prompt=run_prompt,
@@ -463,6 +499,7 @@ def main() -> None:
             tools=tools,
             allowed_tools=allowed_tools,
             session_id=resume_session_id,
+            continue_session=continue_session,
             claude_settings=claude_settings,
             max_turns=max_turns,
             verbose=verbose,
@@ -524,18 +561,22 @@ def main() -> None:
 
         # We treat --step-mode=on as always stepping; auto will attempt one normal run first.
         session_id = args.SESSION_ID
+        continue_session = False
         current_prompt = prompt
 
-        def attempt(*, use_step: bool, resume_id: str, run_prompt: str) -> Tuple[int, str, str]:
+        def attempt(*, use_step: bool, resume_id: str, use_continue: bool, run_prompt: str) -> Tuple[int, str, str]:
             return run_one(
                 run_prompt=run_prompt,
                 resume_session_id=resume_id,
+                continue_session=use_continue,
                 max_turns=CLAUDE_STEP_MAX_TURNS if use_step else None,
             )
 
         if step_mode in ("off", "auto"):
             try:
-                rc0, stdout0, stderr0 = attempt(use_step=False, resume_id=session_id, run_prompt=current_prompt)
+                rc0, stdout0, stderr0 = attempt(
+                    use_step=False, resume_id=session_id, use_continue=continue_session, run_prompt=current_prompt
+                )
             except FileNotFoundError as error:
                 print_exec_error(error)
                 raise SystemExit(0)
@@ -554,8 +595,15 @@ def main() -> None:
                 summary0 = summarize_run(stdout0, stderr0)
                 session_id = (summary0.get("session_id") or session_id) if isinstance(summary0, dict) else session_id
             except Exception:
-                # If parsing fails, start a new session in step mode.
-                session_id = ""
+                # If parsing fails, keep any user-provided session_id and try a loose extraction.
+                extracted = _extract_session_id(stdout0, stderr0)
+                if extracted and not session_id:
+                    session_id = extracted
+
+            # If we still don't have a session id (and the user didn't provide one), prefer continuing the
+            # most recent conversation in this directory instead of starting a brand new session.
+            if not session_id and not args.SESSION_ID:
+                continue_session = True
 
             current_prompt = args.step_continue_prompt
 
@@ -563,7 +611,9 @@ def main() -> None:
         # Keep resuming until Claude produces a final successful result.
         for step_index in range(int(args.step_max_steps)):
             try:
-                rc, stdout, stderr = attempt(use_step=True, resume_id=session_id, run_prompt=current_prompt)
+                rc, stdout, stderr = attempt(
+                    use_step=True, resume_id=session_id, use_continue=continue_session, run_prompt=current_prompt
+                )
             except FileNotFoundError as error:
                 print_exec_error(error)
                 raise SystemExit(0)
@@ -572,6 +622,8 @@ def main() -> None:
             try:
                 summary = summarize_run(stdout, stderr)
                 session_id = summary.get("session_id") or session_id
+                if session_id:
+                    continue_session = False
                 subtype = summary.get("subtype")
                 is_error = bool(summary.get("is_error"))
                 result_text = summary.get("result_text") or ""
@@ -631,6 +683,8 @@ def main() -> None:
                     error_bits.append(f"[exit_code] {rc}")
                 error_bits.append(f"[stdout] {stdout.strip()}")
                 result = {"success": False, "error": "\n".join(error_bits).strip()}
+                if session_id:
+                    result["SESSION_ID"] = session_id
 
             if args.return_all_messages:
                 result["all_messages"] = [payload]
@@ -666,14 +720,19 @@ def main() -> None:
                 if rc != 0:
                     error_bits.append(f"[exit_code] {rc}")
                 result = {"success": False, "error": "\n".join(error_bits).strip()}
+                if session_id:
+                    result["SESSION_ID"] = session_id
 
             result["all_messages"] = messages
 
     except Exception as error:  # noqa: BLE001 - keep bridge resilient
+        extracted_session_id = _extract_session_id(stdout, stderr)
         result = {
             "success": False,
             "error": f"Bridge failed to parse Claude Code output: {error}\n\n[stderr]\n{stderr.strip()}\n\n[stdout]\n{stdout.strip()}".strip(),
         }
+        if extracted_session_id:
+            result["SESSION_ID"] = extracted_session_id
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
