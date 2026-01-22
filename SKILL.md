@@ -22,15 +22,18 @@ Claude Code often needs **1–2+ minutes** per task.
 - Do **NOT** read the script unless you are modifying it; 
 - Before running the script, ALWAYS use `python <script_loc> --help` to get the usage instructions.
 
-## Requirements
+## Usage
 
-- Claude Code CLI installed (`claude --version`) and authenticated (e.g. via your normal Claude Code login/token flow).
+- please always require claude code to fully understand the codebase before responding or making any changes.
+- Put collaborating-with-claude-code terminal commands in the background terminal.
+- Always review claude code's responses (or changes it makes) and make sure they are correct, constructive and complete.
+- When claude code asks clarifying questions in a multi-turn session, always respond to its questions in that session based on current situation.
 
 ## Default
 
-- Defaults to **full access** (`--full-access`): use only in trusted repos/directories.
-- Defaults to **extended thinking ON** (can disable via `--no-extended-thinking`).
-- Defaults to **step mode ON** (can disable via `--step-mode off`).
+- **full access** (`--full-access`): use only in trusted repos/directories.
+- **extended thinking ON** (can disable via `--no-extended-thinking`).
+- **step mode ON** (can disable via `--step-mode off`).
 
 ## Output format
 

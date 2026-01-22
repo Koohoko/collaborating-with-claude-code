@@ -69,18 +69,6 @@ python <script_loc> --no-full-access --cd "/path/to/repo" --PROMPT "Review the a
 
 For a more complete parameter reference and multi-turn session usage, see `SKILL.md`.
 
-## Recommended `AGENTS.md` configuration
-
-It is recommended to add the following prompt to `AGENTS.md` to improve the efficiency and quality of collaboration between Codex and Claude Code:
-
-```
-When collaborating with Claude Code:
-- please always require claude code to fully understand the codebase before responding or making any changes.
-- Put collaborating-with-claude-code terminal commands in the background terminal.
-- Always review claude code's responses (or changes it makes) and make sure they are correct, constructive and complete.
-- When claude code asks clarifying questions in a multi-turn session, always respond to its questions in that session based on current situation.
-```
-
 ## Compatibility
 
 Tested on codex v0.87, claude code v2.1.11 and v2.1.12.

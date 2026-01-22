@@ -69,18 +69,6 @@ python <script_loc> --no-full-access --cd "/path/to/repo" --PROMPT "Review the a
 
 更完整的参数说明与多轮会话用法见 `SKILL.md`。
 
-## 推荐`AGENTS.md`配置
-
-推荐在`AGENTS.md`中配置以下prompt, 提升codex与claude code的交互效率与效果：
-
-```
-When collaborating with Claude Code:
-- please always require claude code to fully understand the codebase before responding or making any changes.
-- Put collaborating-with-claude-code terminal commands in the background terminal.
-- Always review claude code's responses (or changes it makes) and make sure they are correct, constructive and complete.
-- When claude code asks clarifying questions in a multi-turn session, always respond to its questions in that session based on current situation.
-```
-
 ## 兼容性
 
 已经在codex v0.87, claude code v2.1.11 and v2.1.12 测试通过.
