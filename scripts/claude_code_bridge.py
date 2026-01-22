@@ -26,6 +26,8 @@ DEFAULT_STEP_MODE = "auto"  # on|auto|off
 DEFAULT_STEP_MAX_STEPS = 64
 DEFAULT_STEP_CONTINUE_PROMPT = "Continue from where you left off. Do not restate previous content."
 CLAUDE_STEP_MAX_TURNS = 1
+CLAUDE_CONNECTIVITY_ERROR_MESSAGE = "Failed to connect to Claude. Is Claude installed and on PATH?"
+CLAUDE_VERSION_CHECK_TIMEOUT_S = 5.0
 
 
 def _parse_settings_arg(settings_arg: str) -> Dict[str, Any]:
@@ -179,6 +181,7 @@ def _build_claude_cmd(
 
     return cmd
 
+
 def _get_windows_npm_paths() -> List[Path]:
     """Return candidate directories for npm global installs on Windows."""
     if os.name != "nt":
@@ -226,6 +229,65 @@ def _resolve_executable(name: str, env: Dict[str, str]) -> str:
                     return str(candidate)
     return name
 
+
+def _detect_claude_installation(*, claude_bin: str) -> str:
+    """
+    Resolve Claude Code binary on PATH (or from an explicit path) and verify it runs.
+
+    Intended for `--help` gating: if Claude isn't installed/working, we fail early
+    rather than printing a help message for a skill that can't run.
+    """
+    env = os.environ.copy()
+    _augment_path_env(env)
+    resolved = _resolve_executable(claude_bin, env)
+
+    if os.path.isabs(resolved) or os.sep in resolved or (os.altsep and os.altsep in resolved):
+        resolved_path = Path(resolved).expanduser()
+        if not resolved_path.is_file():
+            raise FileNotFoundError(str(resolved_path))
+        resolved_str = str(resolved_path)
+    else:
+        # `_resolve_executable` returns the original name when PATH lookup fails.
+        raise FileNotFoundError(claude_bin)
+
+    try:
+        proc = subprocess.run(
+            [resolved_str, "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=CLAUDE_VERSION_CHECK_TIMEOUT_S,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError("Failed to execute `claude --version`.") from error
+
+    if proc.returncode != 0:
+        raise RuntimeError("`claude --version` returned a non-zero exit code.")
+
+    return resolved_str
+
+
+class _HelpWithClaudeCheckAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: Optional[str] = None,
+    ) -> None:
+        claude_bin = getattr(namespace, "claude_bin", "claude")
+        try:
+            claude_path = _detect_claude_installation(claude_bin=claude_bin)
+        except Exception:
+            parser.exit(status=1, message=f"{CLAUDE_CONNECTIVITY_ERROR_MESSAGE}\n")
+
+        print(f"Claude installed: {claude_path}")
+        parser.print_help(sys.stdout)
+        parser.exit(status=0)
 
 def _windows_escape(prompt: str) -> str:
     """Windows style string escaping for newlines and special chars in prompt text."""
@@ -334,6 +396,7 @@ def main() -> None:
     _configure_windows_stdio()
 
     parser = argparse.ArgumentParser(
+        add_help=False,
         description="Claude Code Bridge: run Claude Code CLI non-interactively and return JSON.",
         epilog=(
             "Examples:\n"
@@ -344,6 +407,15 @@ def main() -> None:
             "Claude Code often takes 1-2+ minutes. Prefer waiting for completion; avoid rapid retries.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        "-h",
+        "--help",
+        action=_HelpWithClaudeCheckAction,
+        nargs=0,
+        default=argparse.SUPPRESS,
+        help="show this help message and exit",
     )
 
     req = parser.add_argument_group("required")
