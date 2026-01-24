@@ -415,7 +415,7 @@ def main() -> None:
         action=_HelpWithClaudeCheckAction,
         nargs=0,
         default=argparse.SUPPRESS,
-        help="show this help message and exit",
+        help=argparse.SUPPRESS,
     )
 
     req = parser.add_argument_group("required")
@@ -465,8 +465,8 @@ def main() -> None:
         default=DEFAULT_STEP_MODE,
         help=(
             "Work around some Anthropic-compatible proxies/routers that enforce strict thinking/tool message schemas. "
-            "When enabled, the bridge runs Claude Code in small agentic steps (`--max-turns 1`) and resumes until completion. "
-            f"Default: {DEFAULT_STEP_MODE}."
+            "When enabled, the bridge runs claude in small agentic steps (`--max-turns 1`) and resumes until completion. "
+            f"Default: {DEFAULT_STEP_MODE}. NO NEED TO CHANGE THIS unless user requests."
         ),
     )
     advanced.add_argument(
