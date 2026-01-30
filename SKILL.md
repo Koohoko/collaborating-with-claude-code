@@ -20,7 +20,7 @@ Claude Code often needs **1–2+ minutes** per task.
 ## Context
 
 - Do **NOT** read the script unless you are modifying it; 
-- Before running the script, ALWAYS use `python <script_loc> --help` to get the usage instructions.
+- Before running the script, ALWAYS use `python3 <script_loc> --help` to get the usage instructions.
 
 ## Usage
 
@@ -34,6 +34,9 @@ Claude Code often needs **1–2+ minutes** per task.
 - **full access** (`--full-access`): use only in trusted repos/directories.
 - **extended thinking ON** (can disable via `--no-extended-thinking`).
 - **step mode ON** (can disable via `--step-mode off`).
+- **sandbox Claude HOME (auto)**: by default the bridge uses a writable sandbox HOME when the current `HOME` isn't writable (prevents `EPERM` failures under sandboxed runners). You can override with `--claude-home-mode system` or `--claude-home-mode sandbox`.
+
+Note: if your runner blocks outbound network, Claude Code may still fail to connect; in Codex this usually means you need to run the command with network-enabled/escalated permissions.
 
 ## Output format
 

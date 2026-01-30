@@ -8,6 +8,7 @@ envelope suitable for multi-model collaboration.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -17,7 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-DEFAULT_MODEL = "claude-opus-4-5-20251101"
+# DEFAULT_MODEL = "claude-opus-4-5-20251101"
+DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 DEFAULT_READONLY_TOOLS = "Read,Glob,Grep,LS"
 DEFAULT_FULL_ACCESS_ALLOWED_TOOLS = "*"
 DEFAULT_EXTENDED_THINKING_ENABLED = True
@@ -28,6 +30,109 @@ DEFAULT_STEP_CONTINUE_PROMPT = "Continue from where you left off. Do not restate
 CLAUDE_STEP_MAX_TURNS = 1
 CLAUDE_CONNECTIVITY_ERROR_MESSAGE = "Failed to connect to Claude. Is Claude installed and on PATH?"
 CLAUDE_VERSION_CHECK_TIMEOUT_S = 5.0
+DEFAULT_CLAUDE_HOME_MODE = "auto"  # auto|system|sandbox
+DEFAULT_CLAUDE_HOME_BASE = "/tmp/codex-claude-home"
+
+
+def _bool_env(name: str) -> bool:
+    val = os.environ.get(name, "").strip().lower()
+    return val in {"1", "true", "yes", "y", "on"}
+
+
+def _readable_path_env(name: str) -> Optional[str]:
+    val = os.environ.get(name)
+    if val is None:
+        return None
+    stripped = val.strip()
+    return stripped or None
+
+
+def _is_writable_dir(path: Path) -> bool:
+    try:
+        return bool(path.is_dir() and os.access(str(path), os.W_OK))
+    except OSError:
+        return False
+
+
+def _safe_claude_home_for_cd(cd_path: Path, base: Path) -> Path:
+    digest = hashlib.sha256(str(cd_path.resolve()).encode("utf-8")).hexdigest()[:24]
+    return base / f"claude-home-{digest}"
+
+
+def _sync_claude_auth_and_settings(*, system_home: Path, sandbox_home: Path) -> None:
+    """
+    Make Claude Code usable when HOME isn't writable by copying auth/config into a writable HOME.
+
+    This is intentionally conservative: copy the most common auth file plus a small allowlist
+    of settings files (not session logs).
+    """
+    sandbox_home.mkdir(parents=True, exist_ok=True)
+
+    src_auth = system_home / ".claude.json"
+    dst_auth = sandbox_home / ".claude.json"
+    if src_auth.is_file():
+        try:
+            if not dst_auth.exists() or src_auth.stat().st_mtime > dst_auth.stat().st_mtime:
+                shutil.copy2(src_auth, dst_auth)
+        except OSError:
+            # Best effort only: if we can't copy, Claude may require /login.
+            pass
+
+    src_dir = system_home / ".claude"
+    if not src_dir.is_dir():
+        return
+
+    dst_dir = sandbox_home / ".claude"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename in ("settings.json", "mcp.json", "config.json"):
+        src_file = src_dir / filename
+        if src_file.is_file():
+            try:
+                shutil.copy2(src_file, dst_dir / filename)
+            except OSError:
+                pass
+
+
+def _apply_claude_home_mode(
+    env: Dict[str, str],
+    *,
+    cd_path: Path,
+    home_mode: str,
+    home_base: Path,
+) -> Dict[str, str]:
+    """
+    Ensure Claude Code has a writable HOME for debug/session files under sandboxed runners.
+
+    - system: do not modify HOME/XDG paths
+    - sandbox: force a writable home under `home_base`
+    - auto: use sandbox home if the current HOME isn't writable
+    """
+    mode = (home_mode or DEFAULT_CLAUDE_HOME_MODE).strip().lower()
+    if mode not in {"auto", "system", "sandbox"}:
+        mode = DEFAULT_CLAUDE_HOME_MODE
+
+    if mode == "system":
+        return env
+
+    current_home = Path(env.get("HOME", str(Path.home()))).expanduser()
+    needs_sandbox = mode == "sandbox" or not _is_writable_dir(current_home)
+    if not needs_sandbox:
+        return env
+
+    sandbox_home = _safe_claude_home_for_cd(cd_path, home_base)
+
+    # Copy auth/config from the real system home (readable in Codex) so Claude stays logged in.
+    system_home = Path(os.path.expanduser("~"))
+    _sync_claude_auth_and_settings(system_home=system_home, sandbox_home=sandbox_home)
+
+    updated = env.copy()
+    updated["HOME"] = str(sandbox_home)
+    # Encourage well-behaved apps to keep state inside the sandbox home.
+    updated["XDG_CONFIG_HOME"] = str(sandbox_home / ".config")
+    updated["XDG_STATE_HOME"] = str(sandbox_home / ".state")
+    updated["XDG_CACHE_HOME"] = str(sandbox_home / ".cache")
+    return updated
 
 
 def _parse_settings_arg(settings_arg: str) -> Dict[str, Any]:
@@ -281,7 +386,30 @@ class _HelpWithClaudeCheckAction(argparse.Action):
     ) -> None:
         claude_bin = getattr(namespace, "claude_bin", "claude")
         try:
-            claude_path = _detect_claude_installation(claude_bin=claude_bin)
+            # Help should also work under sandboxed runners where HOME isn't writable.
+            home_mode = getattr(namespace, "claude_home_mode", DEFAULT_CLAUDE_HOME_MODE)
+            home_base = getattr(namespace, "claude_home_base", DEFAULT_CLAUDE_HOME_BASE)
+            cd_val = getattr(namespace, "cd", None)
+            cd_path = Path(cd_val or os.getcwd()).expanduser()
+            env = os.environ.copy()
+            _augment_path_env(env)
+            env = _apply_claude_home_mode(env, cd_path=cd_path, home_mode=home_mode, home_base=Path(home_base).expanduser())
+            # Run the detection using the modified env (best-effort).
+            resolved = _resolve_executable(claude_bin, env)
+            proc = subprocess.run(
+                [resolved, "--version"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=CLAUDE_VERSION_CHECK_TIMEOUT_S,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError("`claude --version` returned non-zero.")
+            claude_path = resolved
         except Exception:
             parser.exit(status=1, message=f"{CLAUDE_CONNECTIVITY_ERROR_MESSAGE}\n")
 
@@ -307,8 +435,14 @@ def _configure_windows_stdio() -> None:
                 pass
 
 
-def _run(cmd: List[str], timeout_s: Optional[float], cwd: Optional[Path]) -> Tuple[int, str, str]:
-    env = os.environ.copy()
+def _run(
+    cmd: List[str],
+    timeout_s: Optional[float],
+    cwd: Optional[Path],
+    *,
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[int, str, str]:
+    env = (env or os.environ.copy()).copy()
     _augment_path_env(env)
     cmd = cmd.copy()
     cmd[0] = _resolve_executable(cmd[0], env)
@@ -515,6 +649,21 @@ def main() -> None:
     advanced.add_argument("--return-all-messages", action="store_true", help="Return the full streamed JSON event list (debugging).")
     advanced.add_argument("--timeout-s", type=float, default=1800.0, help="Timeout in seconds (default: 30 minutes).")
     advanced.add_argument("--claude-bin", default="claude", help="Claude Code executable name/path (default: `claude`).")
+    advanced.add_argument(
+        "--claude-home-mode",
+        choices=["auto", "system", "sandbox"],
+        default=_readable_path_env("CODEX_CLAUDE_HOME_MODE") or DEFAULT_CLAUDE_HOME_MODE,
+        help=(
+            "Where Claude Code should store its per-run state/config. "
+            "Default: auto (use sandbox HOME if current HOME isn't writable). "
+            "Set to system to preserve the current HOME, or sandbox to force a writable HOME under --claude-home-base."
+        ),
+    )
+    advanced.add_argument(
+        "--claude-home-base",
+        default=_readable_path_env("CODEX_CLAUDE_HOME_BASE") or DEFAULT_CLAUDE_HOME_BASE,
+        help=f"Base directory for sandbox Claude HOME (default: {DEFAULT_CLAUDE_HOME_BASE}).",
+    )
 
     args = parser.parse_args()
 
@@ -559,6 +708,15 @@ def main() -> None:
     output_format = "stream-json" if args.return_all_messages else "json"
     verbose = bool(args.return_all_messages)
 
+    base_env = os.environ.copy()
+    _augment_path_env(base_env)
+    base_env = _apply_claude_home_mode(
+        base_env,
+        cd_path=cd_path,
+        home_mode=str(args.claude_home_mode),
+        home_base=Path(str(args.claude_home_base)).expanduser(),
+    )
+
     def run_one(
         *, run_prompt: str, resume_session_id: str, continue_session: bool, max_turns: Optional[int]
     ) -> Tuple[int, str, str]:
@@ -576,7 +734,7 @@ def main() -> None:
             max_turns=max_turns,
             verbose=verbose,
         )
-        return _run(cmd, timeout_s=args.timeout_s, cwd=cd_path)
+        return _run(cmd, timeout_s=args.timeout_s, cwd=cd_path, env=base_env)
 
     def print_exec_error(error: Exception) -> None:
         print(
@@ -724,6 +882,25 @@ def main() -> None:
         return 1, "", f"Step mode exceeded --step-max-steps={args.step_max_steps} without reaching a final result."
 
     rc, stdout, stderr = run_with_optional_stepping()
+
+    if rc == 124 and not stdout.strip():
+        extra = ""
+        if str(args.claude_home_mode).strip().lower() != "system":
+            extra = (
+                "\n\nNote: this run used a sandbox HOME. If you're running under a sandboxed environment with restricted "
+                "network access, Claude Code may be unable to reach the API and will keep retrying until timeout."
+            )
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": f"Claude Code process timed out after --timeout-s={args.timeout_s}.{extra}\n\n[stderr]\n{stderr.strip()}".strip(),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
 
     try:
         if output_format == "json":

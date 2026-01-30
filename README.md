@@ -58,14 +58,16 @@ ls -la ~/.codex/skills/collaborating-with-claude-code
 ## 手动运行（不通过 Codex CLI）
 
 ```bash
-python <script_loc> --cd "/path/to/repo" --PROMPT "Review the auth flow for bypasses; propose fixes as a unified diff."
+python3 <script_loc> --cd "/path/to/repo" --PROMPT "Review the auth flow for bypasses; propose fixes as a unified diff."
 ```
 
 只读审查（避免改文件/跑命令）：
 
 ```bash
-python <script_loc> --no-full-access --cd "/path/to/repo" --PROMPT "Review the auth flow and list issues (no code changes)."
+python3 <script_loc> --no-full-access --cd "/path/to/repo" --PROMPT "Review the auth flow and list issues (no code changes)."
 ```
+
+如果你在一个写入受限的 runner/sandbox 里运行（例如某些 Codex 环境），Claude Code 可能无法写入 `~/.claude*` 导致 `EPERM`。bridge 脚本默认会在需要时自动切换到一个可写的 sandbox HOME（见 `--claude-home-mode`/`--claude-home-base`）。
 
 更完整的参数说明与多轮会话用法见 `SKILL.md`。
 

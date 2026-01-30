@@ -58,16 +58,18 @@ After that, Codex CLI can discover it when loading local skills; mention `collab
 ## Run manually (without Codex CLI)
 
 ```bash
-python <script_loc> --cd "/path/to/repo" --PROMPT "Review the auth flow for bypasses; propose fixes as a unified diff."
+python3 <script_loc> --cd "/path/to/repo" --PROMPT "Review the auth flow for bypasses; propose fixes as a unified diff."
 ```
 
 Read-only review (avoid editing files / running commands):
 
 ```bash
-python <script_loc> --no-full-access --cd "/path/to/repo" --PROMPT "Review the auth flow and list issues (no code changes)."
+python3 <script_loc> --no-full-access --cd "/path/to/repo" --PROMPT "Review the auth flow and list issues (no code changes)."
 ```
 
 For a more complete parameter reference and multi-turn session usage, see `SKILL.md`.
+
+If you run this in a write-restricted runner/sandbox, Claude Code may fail with `EPERM` when it tries to write `~/.claude*`. The bridge defaults to automatically using a writable sandbox HOME when needed (see `--claude-home-mode` / `--claude-home-base`).
 
 ## Compatibility
 
